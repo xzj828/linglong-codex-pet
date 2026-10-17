@@ -178,6 +178,73 @@ test('a readable active session remains visible when another rollout cannot be r
   assert.equal((await f.monitor.refresh()).state, 'unknown');
 });
 
+test('weeks-old orphaned index entries do not veto a readable latest completion or idle state', async t => {
+  let candidates = [];
+  const f = fixture(t, { discoverPaths: async () => candidates });
+  candidates = [
+    { file: f.file('deleted-history'), origin: 'index', indexUpdatedAt: f.now() - 20 * 86400000 },
+    f.file(),
+  ];
+  f.append('task_started');
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.advance(200); f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'completed');
+  f.advance(61000);
+  assert.equal((await f.monitor.refresh()).state, 'idle');
+  // A new index update makes this entry relevant again even if still missing.
+  candidates[0].indexUpdatedAt = f.now(); f.advance(200);
+  assert.equal((await f.monitor.refresh()).state, 'unknown');
+  // Ignoring an orphan's stale error must not stop following its path.
+  f.append('task_started', { turn_id: 'resumed-history' }, 'deleted-history');
+  assert.equal((await f.monitor.refresh()).state, 'working');
+});
+
+test('missing recent or undated index entries remain uncertain', async t => {
+  let candidates = [];
+  const f = fixture(t, { discoverPaths: async () => candidates });
+  candidates = [{ file: f.file('recent'), origin: 'index', indexUpdatedAt: f.now() - 3600000 }, f.file()];
+  f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'unknown');
+  candidates[0].indexUpdatedAt = null; f.advance(200);
+  assert.equal((await f.monitor.refresh()).state, 'unknown');
+});
+
+test('an observed active session remains uncertain after disappearance even with a stale index timestamp', async t => {
+  let candidates = [];
+  const f = fixture(t, { discoverPaths: async () => candidates });
+  candidates = [{ file: f.file('active'), origin: 'index', indexUpdatedAt: f.now() - 20 * 86400000 }, f.file()];
+  f.append('task_started', { turn_id: 'active-turn' }, 'active');
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  fs.unlinkSync(f.file('active'));
+  f.advance(200); f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'unknown');
+  f.advance(61000);
+  assert.equal((await f.monitor.refresh()).state, 'unknown');
+});
+
+test('permission failures are not treated as orphaned history and diagnostics never expose paths', async t => {
+  let candidates = [], inaccessible;
+  const diagnostics = [];
+  const f = fixture(t, {
+    discoverPaths: async () => candidates,
+    readFs: { ...fs.promises, lstat: async file => {
+      if (file === inaccessible) throw Object.assign(new Error('DO-NOT-EXPOSE-PATH-OR-CONTENT'), { code: 'EACCES' });
+      return fs.promises.lstat(file);
+    } },
+    onDiagnostic: item => diagnostics.push(item),
+  });
+  inaccessible = f.file('restricted');
+  candidates = [{ file: inaccessible, origin: 'index', indexUpdatedAt: f.now() - 20 * 86400000 }, f.file()];
+  f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'unknown');
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(Object.keys(diagnostics[0]).sort(), ['hash', 'stage', 'code', 'count'].sort());
+  assert.match(diagnostics[0].hash, /^[a-f0-9]{12}$/);
+  assert.equal(diagnostics[0].stage, 'lstat'); assert.equal(diagnostics[0].code, 'EACCES');
+  assert.equal(JSON.stringify(diagnostics).includes(f.directory), false);
+  assert.equal(JSON.stringify(diagnostics).includes('DO-NOT-EXPOSE'), false);
+});
+
 test('read-only index discovers resumed sessions outside the recent date directories', async t => {
   let DatabaseSync;
   try { ({ DatabaseSync } = require('node:sqlite')); } catch { t.skip('node:sqlite unavailable'); return; }
@@ -192,4 +259,23 @@ test('read-only index discovers resumed sessions outside the recent date directo
   db.close();
   assert.equal((await f.monitor.refresh()).state, 'working');
   assert.equal(JSON.stringify(f.changes).includes('PRIVATE-TITLE-SENTINEL'), false);
+});
+
+test('real SQLite stale-index discovery preserves latest completion without editing the database', async t => {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); } catch { t.skip('node:sqlite unavailable'); return; }
+  const diagnostics = [];
+  const f = fixture(t, { onDiagnostic: item => diagnostics.push(item) });
+  f.append('task_complete');
+  const databaseFile = path.join(f.directory, 'state_5.sqlite');
+  const db = new DatabaseSync(databaseFile);
+  db.exec('CREATE TABLE threads (rollout_path TEXT, archived INTEGER, updated_at INTEGER)');
+  const insert = db.prepare('INSERT INTO threads VALUES (?,0,?)');
+  insert.run(f.file(), Math.floor(f.now() / 1000));
+  for (let i = 0; i < 11; i++) insert.run(f.file(`missing-${i}`), Math.floor(f.now() / 1000) - (20 + i) * 86400);
+  db.close();
+  const before = fs.readFileSync(databaseFile);
+  assert.equal((await f.monitor.refresh()).state, 'completed');
+  assert.equal(diagnostics.filter(item => item.code === 'ENOENT').length, 11);
+  assert.deepEqual(fs.readFileSync(databaseFile), before);
 });

@@ -3,6 +3,13 @@ const canvas = document.querySelector('#character'), bubble = document.querySele
 let settings = await window.pet.getSettings(), action = 'idle', bubbleTimer, pressed, dragging = false, ignored = false;
 let activity = { state: 'unknown', label: '正在读取状态', message: '正在查看 Codex 的本机工作状态。', action: 'idle' };
 let manualAction = null, transientMessage = null;
+function layout() {
+  // The bubble, padded character stage and name occupy separate flow rows.
+  // Measure wrapped text instead of guessing how much headroom it needs.
+  const reserved = bubble.offsetHeight + home.offsetHeight + 6 + 24 + 24;
+  const size = Math.max(1, Math.min(320 * settings.scale, innerWidth, innerHeight - reserved));
+  document.documentElement.style.setProperty('--sprite-size', size + 'px');
+}
 function renderBubble() {
   const label = transientMessage ? 'ChatGPT' : activity.label.includes('Codex') ? activity.label : 'Codex · ' + activity.label;
   const message = transientMessage || activity.message;
@@ -12,6 +19,7 @@ function renderBubble() {
   bubble.dataset.state = activity.state;
   document.body.dataset.state = activity.state;
   home.title = '打开 ChatGPT 的小窝 · Codex ' + activity.label;
+  layout();
 }
 function say(text) {
   if (!text) return;
@@ -21,7 +29,6 @@ function say(text) {
 function render() {
   action = manualAction || activity.action || 'idle';
   document.body.classList.toggle('quiet', settings.quiet);
-  document.documentElement.style.setProperty('--pet-size', Math.round(320 * settings.scale) + 'px');
   drawSprite(canvas, settings.appearance, action).catch(error => say(error.message));
   renderBubble();
 }
@@ -65,4 +72,6 @@ window.pet.onUpdate(update => {
   render();
 });
 activity = await window.pet.activity();
+new ResizeObserver(layout).observe(bubble);
+window.addEventListener('resize', layout);
 render();

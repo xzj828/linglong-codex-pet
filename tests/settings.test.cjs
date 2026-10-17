@@ -13,8 +13,8 @@ test('invalid settings cannot inject appearance paths or nonfinite bounds', () =
 });
 test('wide size range keeps small status text usable and large pets inside the work area', () => {
   const area = { width: 1920, height: 1040 };
-  assert.deepEqual(petSize(.25, area), { width: 220, height: 190 });
-  assert.deepEqual(petSize(1, area), { width: 320, height: 380 });
+  assert.deepEqual(petSize(.25, area), { width: 220, height: 264 });
+  assert.deepEqual(petSize(1, area), { width: 320, height: 504 });
   assert.deepEqual(petSize(3, area), { width: 960, height: 1040 });
   assert.deepEqual(petSize(3, { width: 800, height: 600 }), { width: 800, height: 600 });
 });

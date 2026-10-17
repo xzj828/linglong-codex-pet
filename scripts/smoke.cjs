@@ -65,6 +65,24 @@ fs.mkdirSync(output, { recursive: true });
     assert.ok(large.bounds.width <= large.area.width && large.bounds.height <= large.area.height, '300% fits monitor work area');
     assert.equal(await panel.locator('#scale').getAttribute('max'), '3');
     assert.equal(await panel.locator('#scale').getAttribute('min'), '0.25');
+    const longMessage = '暂时无法读取部分会话的工作事件，无法确认最新状态；稍后会自动重试。';
+    await app.evaluate(({ BrowserWindow }, message) => {
+      BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('pet.html')).webContents.send('pet:update', {
+        activity: { state: 'unknown', label: '工作状态待确认', message, action: 'idle' }, action: 'headpat'
+      });
+    }, longMessage);
+    for (const scale of [.25, .5, .65, 1, 1.5, 2, 3]) {
+      await panel.evaluate(scale => window.pet.saveSettings({ scale, quiet: false }), scale);
+      await pet.waitForFunction(() => document.querySelector('#bubble').textContent.includes('部分会话'));
+      await pet.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const boxes = await pet.evaluate(() => {
+        const bubble = document.querySelector('#bubble').getBoundingClientRect(), character = document.querySelector('#character').getBoundingClientRect();
+        return { bubbleBottom: bubble.bottom, characterTop: character.top, characterBottom: character.bottom, height: innerHeight };
+      });
+      assert.ok(boxes.bubbleBottom + 7 <= boxes.characterTop, `long bubble stays above animated character at ${scale}: ${JSON.stringify(boxes)}`);
+      if (scale === .65) await pet.screenshot({ path: path.join(output, 'pet-long-bubble.png'), omitBackground: true });
+    }
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('pet.html')).webContents.send('pet:update', { resumeActivity: true }));
     await panel.evaluate(() => window.pet.saveSettings({ scale: 1, quiet: false, appearance: 'cute' }));
     const invalid = await panel.evaluate(async () => { try { await window.pet.action('execute-shell'); return false; } catch { return true; } });
     assert.ok(invalid, 'unknown IPC action rejected');
@@ -83,8 +101,13 @@ fs.mkdirSync(output, { recursive: true });
     event('task_started');
     await pet.waitForFunction(() => document.body.dataset.state === 'working' && document.querySelector('#character').dataset.action === 'busy', null, { timeout: 20000 });
     await panel.waitForFunction(() => document.querySelector('#activity-card').dataset.state === 'working');
+    await pet.waitForFunction(() => document.querySelector('#character').dataset.asset === 'cute-working.png');
     await pet.screenshot({ path: path.join(output, 'pet-working.png'), omitBackground: true });
     await panel.screenshot({ path: path.join(output, 'home-working.png') });
+    await panel.evaluate(() => window.pet.saveSettings({ appearance: 'mature' }));
+    await pet.waitForFunction(() => document.querySelector('#character').dataset.asset === 'mature-working.png');
+    await pet.screenshot({ path: path.join(output, 'pet-working-mature.png'), omitBackground: true });
+    await panel.evaluate(() => window.pet.saveSettings({ appearance: 'cute' }));
     await panel.evaluate(() => window.pet.action('headpat'));
     await pet.waitForFunction(() => document.querySelector('#character').dataset.action === 'headpat');
     event('token_count');
@@ -100,7 +123,7 @@ fs.mkdirSync(output, { recursive: true });
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(win => win.webContents.getURL().includes('pet.html')).setPosition(120, 120));
     await pet.evaluate(() => { window.pet.drag('start'); window.pet.drag('stop'); });
     assert.deepEqual(errors, [], 'no renderer runtime errors');
-    console.log(JSON.stringify({ ok: true, assertions: ['transparent artwork', 'isolated renderer', 'ChatGPT naming', 'panel navigation', 'both appearances', 'six actions', '25%-300% resize', 'readable small bubble', 'working/completed/interrupted activity', 'manual action returns to activity', 'settings persistence', 'IPC validation', 'launch sequence', 'connection status', 'usage display'], screenshots: output }));
+    console.log(JSON.stringify({ ok: true, assertions: ['transparent artwork', 'isolated renderer', 'ChatGPT naming', 'panel navigation', 'both appearances', 'six actions', '25%-300% resize', 'long bubble never overlaps animated character', 'both redesigned working sprites', 'working/completed/interrupted activity', 'manual action returns to activity', 'settings persistence', 'IPC validation', 'launch sequence', 'connection status', 'usage display'], screenshots: output }));
   } finally { await app.close(); }
   const reopened = await electron.launch(launchOptions);
   try {

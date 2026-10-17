@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { createHash } = require('node:crypto');
 const { execFile } = require('node:child_process');
 
 const MAX_FILES = 32;
@@ -40,8 +41,11 @@ function indexedPaths(codexHome) {
     }
     if (!sqliteConstructor) return [];
     database = new sqliteConstructor(databasePath, { readOnly: true, timeout: 100 });
-    return database.prepare('SELECT rollout_path FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT ?')
-      .all(MAX_FILES).map(row => row.rollout_path).filter(value => typeof value === 'string');
+    return database.prepare('SELECT rollout_path, updated_at FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT ?')
+      .all(MAX_FILES).filter(row => typeof row.rollout_path === 'string').map(row => {
+        const updatedAt = Number(row.updated_at);
+        return { file: row.rollout_path, origin: 'index', indexUpdatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt * (updatedAt < 1e12 ? 1000 : 1) : null };
+      });
   } catch { return []; }
   finally { try { database?.close(); } catch {} }
 }
@@ -63,12 +67,15 @@ async function discoverRecentPaths(codexHome, now) {
         if (++seen >= 1024) break;
       }
       names.sort().reverse();
-      candidates.push(...names.slice(0, MAX_FILES).map(name => path.join(directory, name)));
+      candidates.push(...names.slice(0, MAX_FILES).map(name => ({ file: path.join(directory, name), origin: 'directory', indexUpdatedAt: null })));
     } catch { /* A day with no sessions is normal. */ }
   }
-  return [...new Set(candidates.map(candidate => path.resolve(candidate)))]
-    .filter(candidate => within(sessionRoot, candidate) && path.extname(candidate) === '.jsonl')
-    .slice(0, MAX_FILES);
+  const unique = new Map();
+  for (const candidate of candidates) {
+    const file = path.resolve(candidate.file);
+    if (within(sessionRoot, file) && path.extname(file) === '.jsonl' && !unique.has(file)) unique.set(file, { ...candidate, file });
+  }
+  return [...unique.values()].slice(0, MAX_FILES);
 }
 
 function createActivityMonitor(options = {}) {
@@ -78,6 +85,8 @@ function createActivityMonitor(options = {}) {
   const processProbe = options.processProbe || probeCodexProcess;
   const intervalMs = Math.max(100, options.intervalMs ?? 2000);
   const staleMs = Math.max(1000, options.staleMs ?? 10 * 60 * 1000);
+  const orphanAgeMs = Math.max(staleMs, options.orphanAgeMs ?? 24 * 60 * 60 * 1000);
+  const readFs = options.readFs || fs.promises;
   const completionMs = Math.max(1000, options.completionMs ?? 60000);
   const discoverMs = Math.max(100, options.discoverMs ?? 10000);
   const processProbeMs = Math.max(100, options.processProbeMs ?? 8000);
@@ -126,11 +135,32 @@ function createActivityMonitor(options = {}) {
     }
   }
 
+  function readFailure(record, stage, code = 'IO_ERROR') {
+    record.readable = false;
+    record.readError = /^[A-Z][A-Z0-9_]{0,39}$/.test(String(code)) ? String(code) : 'IO_ERROR';
+    record.errorCount++;
+    // Diagnostics are opt-in and contain no filenames, UUIDs, text, or error
+    // messages. A hash can correlate repeated failures without revealing paths.
+    try { options.onDiagnostic?.({ hash: record.hash, stage, code: record.readError, count: record.errorCount }); } catch {}
+  }
+
+  function historicalMissing(record, time) {
+    // Codex can retain archived/deleted files in the active index for weeks.
+    // Only a never-observed, old index entry with a definite missing-file error
+    // is irrelevant. A previously present file, recent index entry, permission
+    // failure, or unknown timestamp remains an honest monitoring uncertainty.
+    return !record.hasBeenPresent && record.origin === 'index'
+      && record.indexUpdatedAt !== null && time - record.indexUpdatedAt > orphanAgeMs
+      && ['ENOENT', 'ENOTDIR'].includes(record.readError);
+  }
+
   async function readRecord(file, record, time, budget) {
     let handle;
+    let stage = 'lstat';
     try {
-      const stat = await fs.promises.lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink()) { record.readable = false; return 0; }
+      const stat = await readFs.lstat(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) { readFailure(record, stage, 'NOT_REGULAR_FILE'); return 0; }
+      record.hasBeenPresent = true;
       const replacement = record.identity !== null && record.identity !== `${stat.dev}:${stat.ino}`;
       if (replacement || stat.size < record.offset) {
         record.offset = 0; record.carry = Buffer.alloc(0); record.skipLine = false;
@@ -144,14 +174,17 @@ function createActivityMonitor(options = {}) {
       }
       const length = Math.min(READ_BYTES, budget, stat.size - record.offset);
       if (length <= 0 && record.readable) return 0;
-      const realFile = await fs.promises.realpath(file);
-      const realRoot = await fs.promises.realpath(sessionRoot);
-      if (!within(realRoot, realFile)) { record.readable = false; return 0; }
-      handle = await fs.promises.open(file, 'r');
+      stage = 'realpath';
+      const realFile = await readFs.realpath(file);
+      const realRoot = await readFs.realpath(sessionRoot);
+      if (!within(realRoot, realFile)) { readFailure(record, stage, 'OUTSIDE_SESSION_ROOT'); return 0; }
+      stage = 'open';
+      handle = await readFs.open(file, 'r');
       // Recheck a previously unreadable, unchanged file without rereading its
       // history. A successful open restores confidence in its last metadata.
-      if (length <= 0) { record.readable = true; return 0; }
+      if (length <= 0) { record.readable = true; record.readError = null; return 0; }
       const buffer = Buffer.alloc(length);
+      stage = 'read';
       const { bytesRead } = await handle.read(buffer, 0, length, record.offset);
       record.offset += bytesRead;
       const content = Buffer.concat([record.carry, buffer.subarray(0, bytesRead)]);
@@ -167,8 +200,9 @@ function createActivityMonitor(options = {}) {
       if (content.length - start > MAX_LINE_BYTES) record.skipLine = true;
       else if (!record.skipLine) record.carry = Buffer.from(content.subarray(start));
       record.readable = true;
+      record.readError = null;
       return bytesRead;
-    } catch { record.readable = false; return 0; }
+    } catch (error) { readFailure(record, stage, error.code); return 0; }
     finally { try { await handle?.close(); } catch {} }
   }
 
@@ -183,7 +217,7 @@ function createActivityMonitor(options = {}) {
       message: active.length > 1 ? `Codex 正在处理 ${active.length} 个会话，我会跟随工作进度。` : 'Codex 正在工作，我陪你一起等。',
       action: 'busy', activeCount: active.length, observedAt: new Date(active[0].eventAt).toISOString(),
     };
-    if ([...records.values()].some(record => !record.readable)) return {
+    if ([...records.values()].some(record => !record.readable && !historicalMissing(record, time))) return {
       ...base, state: 'unknown', label: '工作状态待确认',
       message: '暂时无法读取部分会话的工作事件，无法确认最新状态；稍后会自动重试。',
       action: 'idle', source: 'unavailable',
@@ -205,12 +239,29 @@ function createActivityMonitor(options = {}) {
       }
       if (time - lastDiscovery >= discoverMs) {
         const files = await (options.discoverPaths ? options.discoverPaths() : discoverRecentPaths(codexHome, time));
-        const allowed = [...new Set(files.filter(file => typeof file === 'string').map(file => path.resolve(file)))]
-          .filter(file => within(sessionRoot, file) && path.extname(file) === '.jsonl').slice(0, MAX_FILES);
-        for (const file of allowed) if (!records.has(file)) records.set(file, {
-          offset: 0, initialized: false, carry: Buffer.alloc(0), skipLine: false,
-          state: 'unknown', turn: null, eventAt: 0, readable: false, identity: null,
-        });
+        const candidates = new Map();
+        for (const entry of files) {
+          const value = typeof entry === 'string' ? { file: entry, origin: 'custom', indexUpdatedAt: null } : entry;
+          if (!value || typeof value.file !== 'string') continue;
+          const file = path.resolve(value.file);
+          if (!within(sessionRoot, file) || path.extname(file) !== '.jsonl' || candidates.has(file)) continue;
+          candidates.set(file, value);
+          if (candidates.size >= MAX_FILES) break;
+        }
+        const allowed = [...candidates.keys()];
+        for (const [file, candidate] of candidates) {
+          if (!records.has(file)) records.set(file, {
+            offset: 0, initialized: false, carry: Buffer.alloc(0), skipLine: false,
+            state: 'unknown', turn: null, eventAt: 0, readable: false, identity: null,
+            origin: candidate.origin, indexUpdatedAt: null, hasBeenPresent: false,
+            readError: null, errorCount: 0, hash: createHash('sha256').update(file).digest('hex').slice(0, 12),
+          });
+          const record = records.get(file);
+          if (candidate.origin === 'index') {
+            record.origin = 'index';
+            record.indexUpdatedAt = Number.isFinite(candidate.indexUpdatedAt) && candidate.indexUpdatedAt > 0 ? candidate.indexUpdatedAt : null;
+          }
+        }
         // Keep following resumed old files while their turn is fresh, even if
         // a burst of newly created sessions pushes them out of the index slice.
         for (const [file, record] of records) if (!allowed.includes(file) && (record.state !== 'working' || time - record.eventAt > staleMs)) records.delete(file);

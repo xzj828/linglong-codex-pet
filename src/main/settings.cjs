@@ -68,7 +68,7 @@ function clampPosition(position, area, size) {
 function petSize(scale, area) {
   return {
     width: Math.max(1, Math.min(area.width, Math.max(220, Math.round(320 * scale)))),
-    height: Math.max(1, Math.min(area.height, Math.max(190, Math.round(380 * scale))))
+    height: Math.max(1, Math.min(area.height, Math.round(320 * scale) + 184))
   };
 }
 module.exports = { defaults, normalize, createSettings, clampPosition, petSize };

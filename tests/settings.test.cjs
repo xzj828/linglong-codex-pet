@@ -4,12 +4,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { normalize, createSettings, clampPosition } = require('../src/main/settings.cjs');
+const { normalize, createSettings, clampPosition, petSize } = require('../src/main/settings.cjs');
 test('invalid settings cannot inject appearance paths or nonfinite bounds', () => {
   const config = normalize({ appearance: '../../private', scale: Infinity, x: NaN, autoStart: 'false' });
   assert.equal(config.appearance, 'cute'); assert.equal(config.scale, 1); assert.equal(config.x, null); assert.equal(config.autoStart, true);
-  assert.equal(normalize({ scale: 99 }).scale, 1.5);
-  assert.equal(normalize({ scale: -5 }).scale, .65);
+  assert.equal(normalize({ scale: 99 }).scale, 3);
+  assert.equal(normalize({ scale: -5 }).scale, .25);
+});
+test('wide size range keeps small status text usable and large pets inside the work area', () => {
+  const area = { width: 1920, height: 1040 };
+  assert.deepEqual(petSize(.25, area), { width: 220, height: 190 });
+  assert.deepEqual(petSize(1, area), { width: 320, height: 380 });
+  assert.deepEqual(petSize(3, area), { width: 960, height: 1040 });
+  assert.deepEqual(petSize(3, { width: 800, height: 600 }), { width: 800, height: 600 });
 });
 test('corrupt settings recover and persist validated changes atomically', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'linglong-test-'));

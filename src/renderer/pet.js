@@ -1,13 +1,29 @@
 import { drawSprite } from './sprites.js';
 const canvas = document.querySelector('#character'), bubble = document.querySelector('#bubble'), home = document.querySelector('#home');
 let settings = await window.pet.getSettings(), action = 'idle', bubbleTimer, pressed, dragging = false, ignored = false;
+let activity = { state: 'unknown', label: '正在读取状态', message: '正在查看 Codex 的本机工作状态。', action: 'idle' };
+let manualAction = null, transientMessage = null;
+function renderBubble() {
+  const label = transientMessage ? 'ChatGPT' : activity.label.includes('Codex') ? activity.label : 'Codex · ' + activity.label;
+  const message = transientMessage || activity.message;
+  if (bubble.querySelector('.bubble-label').textContent !== label) bubble.querySelector('.bubble-label').textContent = label;
+  if (bubble.querySelector('.bubble-message').textContent !== message) bubble.querySelector('.bubble-message').textContent = message;
+  bubble.classList.add('visible');
+  bubble.dataset.state = activity.state;
+  document.body.dataset.state = activity.state;
+  home.title = '打开 ChatGPT 的小窝 · Codex ' + activity.label;
+}
 function say(text) {
   if (!text) return;
-  bubble.textContent = text; bubble.classList.add('visible'); clearTimeout(bubbleTimer); bubbleTimer = setTimeout(() => bubble.classList.remove('visible'), 6500);
+  transientMessage = text; renderBubble(); clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(() => { transientMessage = null; renderBubble(); }, 6500);
 }
 function render() {
+  action = manualAction || activity.action || 'idle';
   document.body.classList.toggle('quiet', settings.quiet);
+  document.documentElement.style.setProperty('--pet-size', Math.round(320 * settings.scale) + 'px');
   drawSprite(canvas, settings.appearance, action).catch(error => say(error.message));
+  renderBubble();
 }
 function hit(event) {
   if (event.target === home || home.contains(event.target)) return true;
@@ -42,8 +58,11 @@ home.addEventListener('click', () => window.pet.panel('home'));
 document.addEventListener('mouseleave', () => { if (!pressed) mouse(true); });
 window.pet.onUpdate(update => {
   if (update.settings) settings = update.settings;
-  if (update.action) action = update.action;
+  if (update.activity) activity = update.activity;
+  if (update.action) manualAction = update.action;
+  if (update.resumeActivity) { manualAction = null; transientMessage = null; clearTimeout(bubbleTimer); }
   if (update.message) say(update.message);
   render();
 });
-render(); say('你好呀，我是玲珑。右键来认识一下？');
+activity = await window.pet.activity();
+render();

@@ -23,5 +23,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Linglong-Windows
-          path: dist/Linglong-Setup-*.exe
+          path: dist/ChatGPT-Pet-Setup-*.exe
           if-no-files-found: error

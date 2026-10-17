@@ -5,7 +5,7 @@ const defaults = Object.freeze({ appearance: 'cute', scale: 1, alwaysOnTop: true
 function normalize(input = {}) {
   return {
     appearance: input.appearance === 'mature' ? 'mature' : 'cute',
-    scale: Number.isFinite(input.scale) ? Math.max(.65, Math.min(1.5, input.scale)) : 1,
+    scale: Number.isFinite(input.scale) ? Math.max(.25, Math.min(3, input.scale)) : 1,
     alwaysOnTop: typeof input.alwaysOnTop === 'boolean' ? input.alwaysOnTop : true,
     autoStart: typeof input.autoStart === 'boolean' ? input.autoStart : true,
     quiet: input.quiet === true,
@@ -65,4 +65,10 @@ function createSettings(directory, { fs: io = fs, onError = () => {} } = {}) {
 function clampPosition(position, area, size) {
   return { x: Math.round(Math.max(area.x, Math.min(position.x, area.x + area.width - size.width))), y: Math.round(Math.max(area.y, Math.min(position.y, area.y + area.height - size.height))) };
 }
-module.exports = { defaults, normalize, createSettings, clampPosition };
+function petSize(scale, area) {
+  return {
+    width: Math.max(1, Math.min(area.width, Math.max(220, Math.round(320 * scale)))),
+    height: Math.max(1, Math.min(area.height, Math.max(190, Math.round(380 * scale))))
+  };
+}
+module.exports = { defaults, normalize, createSettings, clampPosition, petSize };

@@ -10,6 +10,8 @@
 
 ## GitHub 桌宠项目
 
+工作状态设计同时参考 [App Server 的线程状态与回合事件](https://learn.chatgpt.com/docs/app-server)：`thread/status/changed` 提供运行时状态，`turn/completed` 区分完成、中断和失败。这些通知属于对应服务器连接，另起一个 app-server 不能据此读取桌面已有任务的实时状态。因此本项目只读本机已有会话记录，以实际 `task_started`、`task_complete`、`turn_aborted` 事件跟随桌面工作，不创建新模型任务。会话文件属于实现细节；版本变化或记录缺失时必须显示未知。
+
 | 项目 | 可参考内容 | 使用边界 |
 | --- | --- | --- |
 | [LorisYounger/VPet](https://github.com/LorisYounger/VPet) | WPF 桌宠的摸头、投喂、动画状态以及人物工具栏设计 | 代码为 Apache-2.0；角色动画另有授权条款，不能把代码许可证视为素材授权 |

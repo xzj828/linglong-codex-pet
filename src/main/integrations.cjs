@@ -223,7 +223,7 @@ async function connectNano(options = {}) {
   // Some Nano Flutter versions expose no accessibility controls. Bring the
   // existing window forward instead of blindly clicking a connection toggle.
   await powershell(`$shell=New-Object -ComObject WScript.Shell; $null=$shell.AppActivate('Nano')`, 3000).catch(() => {});
-  progress('请在 Nano 首页点击“连接”。玲珑将在 30 秒内自动接着打开 Codex。');
+  progress('请在 Nano 首页点击“连接”。ChatGPT将在 30 秒内自动接着打开 Codex。');
   // A manual connection can finish the same click. The main process may also
   // use needsInteraction to keep its own progress UI visible during this wait.
   const pendingDeadline = Date.now() + (options.manualConnectTimeout ?? 30000);
@@ -289,7 +289,7 @@ function getLiveUsage(executable, timeout = 8000) {
         }
       }
     });
-    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'linglong-desktop-pet', version: '1.0.0' }, capabilities: {} } });
+    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'linglong-desktop-pet', version: require('../../package.json').version }, capabilities: {} } });
   });
 }
 

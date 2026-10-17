@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('pet', Object.freeze({
   saveSettings: patch => invoke('save-settings', patch),
   launch: () => invoke('launch'),
   status: () => invoke('status'),
+  activity: () => invoke('activity'),
   usage: () => invoke('usage'),
   action: action => invoke('action', action),
   panel: tab => invoke('panel', tab),

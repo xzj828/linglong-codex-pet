@@ -1,8 +1,8 @@
 {
   "name": "linglong-codex-pet",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
-  "description": "玲珑 · Windows 桌宠，陪你连接 Nano 并打开 Codex",
+  "description": "ChatGPT · Windows 桌宠，陪你连接 Nano 并打开 Codex",
   "author": "xzj828",
   "license": "MIT",
   "main": "src/main/main.cjs",
@@ -21,8 +21,8 @@
   },
   "build": {
     "appId": "io.github.xzj828.linglong",
-    "productName": "Linglong",
-    "artifactName": "Linglong-Setup-${version}.${ext}",
+    "productName": "ChatGPT",
+    "artifactName": "ChatGPT-Pet-Setup-${version}.${ext}",
     "directories": {
       "output": "dist"
     },
@@ -44,8 +44,9 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "玲珑桌宠",
+      "shortcutName": "ChatGPT桌宠",
       "include": "scripts/installer.nsh"
-    }
+    },
+    "executableName": "Linglong"
   }
 }

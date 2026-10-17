@@ -3,13 +3,14 @@ const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen, shell, dia
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { createSettings, clampPosition } = require('./settings.cjs');
+const { createSettings, clampPosition, petSize } = require('./settings.cjs');
+const { createActivityMonitor } = require('./codex-activity.cjs');
 const integrations = require('./integrations.cjs');
 const testing = process.env.LINGLONG_TEST === '1';
 if (testing && process.env.LINGLONG_TEST_DATA) app.setPath('userData', process.env.LINGLONG_TEST_DATA);
 app.setAppUserModelId('io.github.xzj828.linglong');
 let petWindow, panelWindow, tray, store, dragging, dragTimer, launching = false;
-let actionTimer, options = {};
+let actionTimer, activityMonitor, options = {};
 const root = path.join(__dirname, '..', '..');
 const renderer = name => path.join(root, 'src', 'renderer', name);
 const allowedUrls = new Set(['pet.html', 'panel.html'].map(name => pathToFileURL(renderer(name)).href));
@@ -23,7 +24,7 @@ function send(data) {
 function animate(action, message) {
   clearTimeout(actionTimer);
   send({ action, message });
-  if (!['idle', 'sleep', 'crouch', 'busy'].includes(action)) actionTimer = setTimeout(() => send({ action: 'idle' }), 5200);
+  if (action !== 'busy') actionTimer = setTimeout(() => send({ resumeActivity: true }), ['sleep', 'crouch'].includes(action) ? 15000 : 5200);
 }
 function loginSettings() {
   return { name: 'LinglongPet', path: process.execPath, args: app.isPackaged ? ['--autostart'] : ['"' + root + '"', '--autostart'] };
@@ -37,11 +38,15 @@ function safePosition(position, size) {
 }
 function resizePet(restore = false) {
   const config = store.get();
-  const size = { width: Math.round(320 * config.scale), height: Math.round(380 * config.scale) };
-  const area = screen.getPrimaryDisplay().workArea;
   const current = petWindow?.getBounds();
+  const area = (current && restore !== true
+    ? screen.getDisplayMatching(current)
+    : Number.isFinite(config.x) && Number.isFinite(config.y)
+      ? screen.getDisplayNearestPoint({ x: config.x, y: config.y })
+      : screen.getPrimaryDisplay()).workArea;
+  const size = petSize(config.scale, area);
   const initial = { x: config.x ?? area.x + area.width - size.width - 32, y: config.y ?? area.y + area.height - size.height - 10 };
-  const position = safePosition(restore === true ? initial : (current || initial), size);
+  const position = clampPosition(restore === true ? initial : (current || initial), area, size);
   petWindow.setBounds({ ...position, ...size });
   petWindow.setAlwaysOnTop(config.alwaysOnTop, 'floating');
 }
@@ -57,7 +62,7 @@ async function panel(tab = 'home') {
     panelWindow.show(); panelWindow.focus(); send({ tab }); return;
   }
   const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
-  panelWindow = new BrowserWindow({ width: 480, height: Math.min(840, area.height - 24), minWidth: 440, minHeight: 520, icon: path.join(root, 'assets', 'icon.ico'), title: '玲珑 · 桌边的小小陪伴', backgroundColor: '#f7f5fc', autoHideMenuBar: true, show: false, webPreferences: webPreferences() });
+  panelWindow = new BrowserWindow({ width: 480, height: Math.min(840, area.height - 24), minWidth: 440, minHeight: 520, icon: path.join(root, 'assets', 'icon.ico'), title: 'ChatGPT · 桌边的小小陪伴', backgroundColor: '#f7f5fc', autoHideMenuBar: true, show: false, webPreferences: webPreferences() });
   lockWindow(panelWindow);
   await panelWindow.loadFile(renderer('panel.html'), { query: { tab } });
   panelWindow.show();
@@ -81,18 +86,18 @@ async function launch() {
   } catch (error) {
     animate('wave', error.message || '启动遇到问题，右键查看状态。');
     return { ok: false, message: error.message || '启动失败' };
-  } finally { launching = false; }
+  } finally { launching = false; clearTimeout(actionTimer); actionTimer = setTimeout(() => send({ resumeActivity: true }), 5200); }
 }
 function menu() {
   const config = store.get();
   const item = (label, action, message) => ({ label, click: () => animate(action, message) });
   return Menu.buildFromTemplate([
-    { label: '玲珑 · 在你桌边', enabled: false },
+    { label: 'ChatGPT · 在你桌边', enabled: false },
     { label: launching ? '正在准备…' : '连接 Nano 并打开 Codex', enabled: !launching, click: launch },
     { type: 'separator' },
     { label: '切换形象', submenu: [
-      { label: '可爱 · 小玲', type: 'radio', checked: config.appearance === 'cute', click: () => update({ appearance: 'cute' }) },
-      { label: '成熟 · 玲月', type: 'radio', checked: config.appearance === 'mature', click: () => update({ appearance: 'mature' }) }
+      { label: '可爱', type: 'radio', checked: config.appearance === 'cute', click: () => update({ appearance: 'cute' }) },
+      { label: '成熟', type: 'radio', checked: config.appearance === 'mature', click: () => update({ appearance: 'mature' }) }
     ] },
     item('蹲下休息', 'crouch', '歇一小会儿，陪你慢慢来。'),
     item('吃饭', 'eat', '今天也要好好吃饭呀。'),
@@ -101,6 +106,7 @@ function menu() {
     item('睡一会儿', 'sleep', '晚安，做个柔软的梦。'),
     item('站起来', 'idle', '精神满满！'),
     { type: 'separator' },
+    { label: '查看 Codex 工作状态', click: () => panel('home') },
     { label: '查看连接状态', click: () => panel('status') },
     { label: '查看剩余额度', click: () => panel('usage') },
     { label: '我的小窝 / 设置', click: () => panel('home') },
@@ -111,7 +117,7 @@ function menu() {
       if (petWindow.isVisible()) petWindow.hide(); else petWindow.showInactive();
       tray?.setContextMenu(menu());
     } },
-    { label: '退出玲珑', click: () => app.quit() }
+    { label: '退出ChatGPT', click: () => app.quit() }
   ]);
 }
 function update(patch) {
@@ -130,6 +136,7 @@ function registerHandlers() {
     'save-settings': update,
     launch,
     status: () => integrations.getConnectionStatus(options),
+    activity: () => activityMonitor.getSnapshot(),
     usage: () => integrations.getUsage(options),
     action: value => {
       if (!validActions.has(value) || ['busy', 'success'].includes(value)) throw new Error('未知动作');
@@ -196,18 +203,24 @@ else {
       send({ message: '暂时无法保存设置，本次操作仍然有效；退出后可能恢复旧设置。' });
     } });
     try { options = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'local-config.json'), 'utf8')); } catch { options = {}; }
+    activityMonitor = createActivityMonitor({
+      codexHome: testing ? process.env.LINGLONG_ACTIVITY_HOME || path.join(app.getPath('userData'), 'codex-fixture') : options.codexHome,
+      ...(testing ? { processProbe: async () => true } : {}),
+      onChange: activity => send({ activity })
+    });
     petWindow = new BrowserWindow({ width: 320, height: 380, frame: false, transparent: true, resizable: false, maximizable: false, minimizable: false, hasShadow: false, skipTaskbar: true, show: false, webPreferences: webPreferences() });
     lockWindow(petWindow); resizePet(true); registerHandlers();
     petWindow.on('blur', stopDrag);
     await petWindow.loadFile(renderer('pet.html'));
     petWindow.showInactive();
-    tray = new Tray(trayIcon()); tray.setToolTip('玲珑桌宠 · 右键互动，左键启程'); tray.setContextMenu(menu());
+    activityMonitor.start();
+    tray = new Tray(trayIcon()); tray.setToolTip('ChatGPT桌宠 · 右键互动，左键启程'); tray.setContextMenu(menu());
     tray.on('double-click', () => { petWindow.showInactive(); panel('home'); });
     autoStart(store.get().autoStart);
     screen.on('display-metrics-changed', resizePet);
     screen.on('display-removed', resizePet);
     if (process.argv.includes('--welcome')) await panel('home');
   }).catch(error => { console.error(error); app.quit(); });
-  app.on('before-quit', () => { clearTimeout(actionTimer); clearInterval(dragTimer); });
+  app.on('before-quit', () => { clearTimeout(actionTimer); clearInterval(dragTimer); activityMonitor?.stop(); });
   app.on('window-all-closed', () => app.quit());
 }

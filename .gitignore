@@ -1,0 +1,11 @@
+node_modules/
+dist/
+output/
+tmp/
+test-results/
+*.log
+.env*
+!.env.example
+settings.json
+local-config.json
+.DS_Store

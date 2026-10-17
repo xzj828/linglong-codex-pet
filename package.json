@@ -1,0 +1,51 @@
+{
+  "name": "linglong-codex-pet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "玲珑 · Windows 桌宠，陪你连接 Nano 并打开 Codex",
+  "author": "xzj828",
+  "license": "MIT",
+  "main": "src/main/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:ui": "node scripts/smoke.cjs",
+    "test:native": "node scripts/native-smoke.cjs",
+    "pack": "node scripts/build.cjs --dir",
+    "dist": "node scripts/build.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3",
+    "playwright": "1.64.1"
+  },
+  "build": {
+    "appId": "io.github.xzj828.linglong",
+    "productName": "Linglong",
+    "artifactName": "Linglong-Setup-${version}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "src/main/nano-connect.ps1"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "玲珑桌宠",
+      "include": "scripts/installer.nsh"
+    }
+  }
+}

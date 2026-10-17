@@ -3,10 +3,11 @@ const canvas = document.querySelector('#character'), bubble = document.querySele
 let settings = await window.pet.getSettings(), action = 'idle', bubbleTimer, pressed, dragging = false, ignored = false;
 let activity = { state: 'unknown', label: '正在读取状态', message: '正在查看 Codex 的本机工作状态。', action: 'idle' };
 let manualAction = null, transientMessage = null;
+const taskStates = new Set(['working', 'thinking', 'tool', 'waiting', 'completed', 'failed', 'interrupted']);
 function layout() {
   // The bubble, padded character stage and name occupy separate flow rows.
   // Measure wrapped text instead of guessing how much headroom it needs.
-  const reserved = bubble.offsetHeight + home.offsetHeight + 6 + 24 + 24;
+  const reserved = bubble.offsetHeight + home.offsetHeight + 6 + 24 + (bubble.hidden ? 12 : 24);
   const size = Math.max(1, Math.min(320 * settings.scale, innerWidth, innerHeight - reserved));
   document.documentElement.style.setProperty('--sprite-size', size + 'px');
 }
@@ -15,7 +16,11 @@ function renderBubble() {
   const message = transientMessage || activity.message;
   if (bubble.querySelector('.bubble-label').textContent !== label) bubble.querySelector('.bubble-label').textContent = label;
   if (bubble.querySelector('.bubble-message').textContent !== message) bubble.querySelector('.bubble-message').textContent = message;
-  bubble.classList.add('visible');
+  // Idle/offline/unknown status remains available in the panel, not on the desktop.
+  // Launch progress and brief task results are also task-related messages.
+  const visible = taskStates.has(activity.state) || ['busy', 'success', 'sad'].includes(manualAction);
+  bubble.hidden = !visible;
+  bubble.classList.toggle('visible', visible);
   bubble.dataset.state = activity.state;
   document.body.dataset.state = activity.state;
   home.title = '打开 ChatGPT 的小窝 · Codex ' + activity.label;
@@ -65,7 +70,12 @@ home.addEventListener('click', () => window.pet.panel('home'));
 document.addEventListener('mouseleave', () => { if (!pressed) mouse(true); });
 window.pet.onUpdate(update => {
   if (update.settings) settings = update.settings;
-  if (update.activity) activity = update.activity;
+  if (update.activity) {
+    if (activity.state !== update.activity.state && taskStates.has(update.activity.state)) {
+      manualAction = null; transientMessage = null; clearTimeout(bubbleTimer);
+    }
+    activity = update.activity;
+  }
   if (update.action) manualAction = update.action;
   if (update.resumeActivity) { manualAction = null; transientMessage = null; clearTimeout(bubbleTimer); }
   if (update.message) say(update.message);

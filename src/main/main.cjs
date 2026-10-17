@@ -75,7 +75,7 @@ async function launch() {
   try {
     const connection = testing ? { connected: true, message: '测试连接' } : await integrations.connectNano({ ...options, onProgress: message => animate('busy', message) });
     if (!connection.connected) {
-      animate('wave', connection.message || 'Nano 还没连好，右键查看连接状态。');
+      animate('sad', connection.message || 'Nano 还没连好，右键查看连接状态。');
       return { ok: false, connection, message: connection.message };
     }
     animate('busy', '连接就绪，正在打开 Codex…');
@@ -84,7 +84,7 @@ async function launch() {
     animate('success', '准备好啦，一起开始吧。');
     return { ok: true, connection, codex, message: 'Nano 已连接，Codex 已打开。' };
   } catch (error) {
-    animate('wave', error.message || '启动遇到问题，右键查看状态。');
+    animate('sad', error.message || '启动遇到问题，右键查看状态。');
     return { ok: false, message: error.message || '启动失败' };
   } finally { launching = false; clearTimeout(actionTimer); actionTimer = setTimeout(() => send({ resumeActivity: true }), 5200); }
 }
@@ -205,7 +205,7 @@ else {
     try { options = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'local-config.json'), 'utf8')); } catch { options = {}; }
     activityMonitor = createActivityMonitor({
       codexHome: testing ? process.env.LINGLONG_ACTIVITY_HOME || path.join(app.getPath('userData'), 'codex-fixture') : options.codexHome,
-      ...(testing ? { processProbe: async () => true } : {}),
+      ...(testing ? { processProbe: async () => true, completionMs: 5000 } : {}),
       onChange: activity => send({ activity })
     });
     petWindow = new BrowserWindow({ width: 320, height: 380, frame: false, transparent: true, resizable: false, maximizable: false, minimizable: false, hasShadow: false, skipTaskbar: true, show: false, webPreferences: webPreferences() });

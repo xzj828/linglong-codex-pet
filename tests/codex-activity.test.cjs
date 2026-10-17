@@ -43,7 +43,7 @@ test('only lifecycle metadata is exposed through work, completion and stop trans
   await f.monitor.refresh();
   f.append('turn_aborted', { turn_id: 'turn-two', reason: 'PRIVATE-CONTENT-SENTINEL' });
   const aborted = await f.monitor.refresh();
-  assert.equal(aborted.state, 'idle'); assert.equal(aborted.label, '任务已停止');
+  assert.equal(aborted.state, 'interrupted'); assert.equal(aborted.label, '任务已中断'); assert.equal(aborted.action, 'sad');
   assert.equal(JSON.stringify(f.changes).includes('PRIVATE-CONTENT-SENTINEL'), false);
   assert.deepEqual(Object.keys(aborted).sort(), ['state', 'label', 'message', 'action', 'observedAt', 'activeCount', 'source'].sort());
 });
@@ -62,6 +62,115 @@ test('token accounting extends an active turn but never resurrects a completed o
   assert.equal((await f.monitor.refresh()).state, 'completed');
   f.advance(61000);
   assert.equal((await f.monitor.refresh()).state, 'idle');
+});
+
+test('explicit terminal failures show sadness without exposing errors and expire after one minute', async t => {
+  const f = fixture(t);
+  f.append('task_started'); await f.monitor.refresh();
+  f.advance(200);
+  f.append('task_complete', { error: { message: 'PRIVATE-ERROR-SENTINEL', codex_error_info: 'usage_limit_exceeded' } });
+  const failed = await f.monitor.refresh();
+  assert.equal(failed.state, 'failed'); assert.equal(failed.action, 'sad');
+  assert.equal(failed.activeCount, 0);
+  assert.equal(JSON.stringify(f.changes).includes('PRIVATE-ERROR-SENTINEL'), false);
+  f.advance(59000);
+  assert.equal((await f.monitor.refresh()).state, 'failed');
+  f.advance(2000);
+  assert.equal((await f.monitor.refresh()).state, 'idle');
+  assert.equal(f.monitor.getSnapshot().action, 'idle');
+});
+
+test('interruptions expire and a new task immediately clears sad terminal results', async t => {
+  const f = fixture(t);
+  f.append('task_started'); f.append('turn_aborted', { reason: 'interrupted' });
+  assert.equal((await f.monitor.refresh()).state, 'interrupted');
+  assert.equal(f.monitor.getSnapshot().action, 'sad');
+  f.advance(61000);
+  assert.equal((await f.monitor.refresh()).state, 'idle');
+  f.append('task_started', { turn_id: 'retry-one' });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.append('task_complete', { turn_id: 'retry-one', error: { message: 'failed' } });
+  assert.equal((await f.monitor.refresh()).state, 'failed');
+  f.append('task_started', { turn_id: 'retry-two' });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  assert.equal(f.monitor.getSnapshot().action, 'busy');
+  f.append('turn_aborted', { turn_id: 'retry-two', reason: 'replaced' });
+  assert.equal((await f.monitor.refresh()).state, 'interrupted');
+  f.append('task_started', { turn_id: 'retry-three' });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+});
+
+test('legacy turn errors become failed only with a matching completion', async t => {
+  const f = fixture(t);
+  f.append('task_started');
+  f.append('error', { message: 'private', codex_error_info: { response_too_many_failed_attempts: { http_status_code: 503 } } });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.append('token_count'); f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'failed');
+  f.append('task_complete'); f.append('token_count');
+  assert.equal((await f.monitor.refresh()).state, 'failed');
+});
+
+test('network retries and continued model work clear old errors before a successful completion', async t => {
+  const f = fixture(t);
+  for (const [index, recovery] of [
+    { type: 'stream_error', message: 'retry', codex_error_info: { response_stream_disconnected: { http_status_code: 502 } } },
+    { type: 'error', message: 'retry', willRetry: true },
+    { type: 'error', message: 'retry', will_retry: true },
+    { type: 'item_completed', item: { type: 'Reasoning' } },
+    { type: 'item_completed', item: { type: 'AgentMessage' } },
+    { type: 'agent_reasoning' },
+    { type: 'auth_recovery_completed' },
+  ].entries()) {
+    const turn_id = `retry-${index}`;
+    f.append('task_started', { turn_id });
+    f.append('error', { turn_id, message: 'retryable', codex_error_info: { response_stream_disconnected: { http_status_code: 502 } } });
+    f.append(recovery.type, { ...recovery, turn_id });
+    assert.equal((await f.monitor.refresh()).state, 'working');
+    f.append('task_complete', { turn_id });
+    assert.equal((await f.monitor.refresh()).state, 'completed');
+  }
+});
+
+test('a bounded tail beginning at an error still recognizes subsequent model recovery', async t => {
+  const f = fixture(t);
+  f.append('error', { message: 'old stream failure', codex_error_info: { response_stream_disconnected: { http_status_code: 502 } } });
+  f.append('item_completed', { item: { type: 'Reasoning' } });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'completed');
+});
+
+test('tool failures, request errors, and unknown error classifications are not task failures', async t => {
+  const f = fixture(t);
+  f.append('task_started');
+  f.append('item_completed', { item: { type: 'CommandExecution', status: 'failed', exit_code: 1 } });
+  f.append('patch_apply_end', { success: false, status: 'failed' });
+  f.append('error', { message: 'request rejected', codex_error_info: 'thread_rollback_failed' });
+  f.append('error', { message: 'request rejected', codex_error_info: { active_turn_not_steerable: { turn_kind: 'review' } } });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'completed');
+  f.append('task_started', { turn_id: 'unclassified' });
+  f.append('error', { turn_id: 'unclassified', message: 'unknown classification', codex_error_info: 'future_error_kind' });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.append('task_complete', { turn_id: 'unclassified' });
+  const unknown = await f.monitor.refresh();
+  assert.equal(unknown.state, 'unknown'); assert.equal(unknown.action, 'idle');
+});
+
+test('interruptions cannot be overwritten by cleanup completion and old-turn errors cannot poison new work', async t => {
+  const f = fixture(t);
+  f.append('task_started'); f.append('turn_aborted', { reason: 'interrupted' });
+  await f.monitor.refresh();
+  f.append('task_complete');
+  assert.equal((await f.monitor.refresh()).state, 'interrupted');
+  f.append('task_started', { turn_id: 'new-turn' });
+  f.append('error', { turn_id: 'turn-one', message: 'old failure', codex_error_info: 'usage_limit_exceeded' });
+  f.append('task_complete', { turn_id: 'turn-one', error: { message: 'old failure' } });
+  assert.equal((await f.monitor.refresh()).state, 'working');
+  f.append('task_complete', { turn_id: 'new-turn' });
+  assert.equal((await f.monitor.refresh()).state, 'completed');
 });
 
 test('simultaneous sessions remain working until every active session has finished', async t => {

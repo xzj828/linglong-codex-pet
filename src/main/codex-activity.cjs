@@ -13,6 +13,27 @@ const REFRESH_BYTES = MAX_FILES * INITIAL_TAIL_BYTES;
 const MAX_LINE_BYTES = 256 * 1024;
 let sqliteConstructor;
 
+// Core rollout ErrorEvent codes that affect a turn's final status. Request-level
+// rollback/steering failures and StreamError retry notices are deliberately not
+// terminal outcomes. See CodexErrorInfo::affects_turn_status in openai/codex.
+const TURN_ERROR_CODES = new Set([
+  'context_window_exceeded', 'session_budget_exceeded', 'usage_limit_exceeded',
+  'rate_limit_exceeded', 'flex_unavailable', 'server_overloaded', 'cyber_policy',
+  'bio_policy', 'misalignment_policy_violation', 'too_many_denials',
+  'http_connection_failed', 'response_stream_connection_failed',
+  'internal_server_error', 'unauthorized', 'bad_request', 'invalid_prompt',
+  'sandbox_error', 'response_stream_disconnected', 'response_too_many_failed_attempts',
+]);
+
+function errorCode(info) {
+  if (typeof info === 'string') return info;
+  if (info && typeof info === 'object' && !Array.isArray(info)) {
+    const keys = Object.keys(info);
+    if (keys.length === 1) return keys[0];
+  }
+  return null;
+}
+
 function within(directory, candidate) {
   const relative = path.relative(directory, candidate);
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
@@ -112,7 +133,7 @@ function createActivityMonitor(options = {}) {
     try { event = JSON.parse(line); } catch { return; }
     if (event.type !== 'event_msg' || !event.payload || typeof event.payload !== 'object') return;
     const type = event.payload.type;
-    if (!['task_started', 'task_complete', 'turn_aborted', 'item_completed', 'token_count', 'agent_reasoning'].includes(type)) return;
+    if (!['task_started', 'task_complete', 'turn_aborted', 'item_completed', 'token_count', 'agent_reasoning', 'error', 'stream_error', 'auth_recovery_started', 'auth_recovery_completed'].includes(type)) return;
     const timestamp = Date.parse(event.timestamp);
     if (!Number.isFinite(timestamp) || timestamp > time + 60000) return;
     // A resumed/forked file can contain copied history. Ignore out-of-order
@@ -120,17 +141,49 @@ function createActivityMonitor(options = {}) {
     if (timestamp < record.eventAt) return;
     const turn = typeof event.payload.turn_id === 'string' ? event.payload.turn_id.slice(0, 160) : null;
     if (type === 'task_started') {
-      record.state = 'working'; record.turn = turn; record.eventAt = timestamp;
+      record.state = 'working'; record.turn = turn; record.eventAt = timestamp; record.pendingError = null;
     } else if (type === 'task_complete' || type === 'turn_aborted') {
       if (record.state === 'working' && turn && record.turn && turn !== record.turn) return;
-      record.state = type === 'task_complete' ? 'completed' : 'aborted';
+      const sameTurn = !turn || !record.turn || turn === record.turn;
+      if (type === 'turn_aborted') record.state = 'interrupted';
+      else if (event.payload.error != null) {
+        // Newer Core versions persist an explicit terminal ErrorEvent here.
+        // Inspect its shape only; never retain or display its sensitive text.
+        record.state = typeof event.payload.error === 'object' && !Array.isArray(event.payload.error)
+          && typeof event.payload.error.message === 'string' ? 'failed' : 'unknown';
+      } else if (sameTurn && ['failed', 'interrupted'].includes(record.state)) {
+        // Cleanup/duplicate completion must not relabel a failed or interrupted
+        // turn as success. A new task_started resets this outcome immediately.
+      } else if (record.pendingError && (!record.pendingError.turn || !turn || record.pendingError.turn === turn)) {
+        record.state = record.pendingError.outcome;
+      } else record.state = 'completed';
+      record.pendingError = null;
       record.turn = turn || record.turn; record.eventAt = timestamp;
+    } else if (['stream_error', 'auth_recovery_started', 'auth_recovery_completed'].includes(type)) {
+      if (turn && record.turn && turn !== record.turn) return;
+      if (record.state === 'working' || record.state === 'unknown') record.pendingError = null;
+      if (record.state === 'working') record.eventAt = timestamp;
+    } else if (type === 'error') {
+      if (turn && record.turn && turn !== record.turn) return;
+      if (!['working', 'unknown'].includes(record.state)) return;
+      if (event.payload.will_retry === true || event.payload.willRetry === true) {
+        record.pendingError = null; return;
+      }
+      const code = errorCode(event.payload.codex_error_info);
+      if (['thread_rollback_failed', 'active_turn_not_steerable'].includes(code)) return;
+      if (typeof event.payload.message !== 'string') return;
+      // A bare error does not end the turn. Legacy Core error -> task_complete
+      // sequences carry the failed result only after the matching completion.
+      // Unknown error classifications cannot establish failure or success.
+      record.pendingError = { turn: turn || record.turn, outcome: TURN_ERROR_CODES.has(code) ? 'failed' : 'unknown' };
     } else if (record.state === 'working') {
       if (turn && record.turn && turn !== record.turn) return;
+      if (type === 'agent_reasoning' || (type === 'item_completed' && ['Reasoning', 'AgentMessage'].includes(event.payload.item?.type))) record.pendingError = null;
       record.eventAt = timestamp;
     } else if (record.state === 'unknown' && ['item_completed', 'agent_reasoning'].includes(type)) {
       // Initial bounded tails may omit task_started. A fresh completed item is
       // evidence of activity; it is not evidence that the entire turn finished.
+      if (type === 'agent_reasoning' || ['Reasoning', 'AgentMessage'].includes(event.payload.item?.type)) record.pendingError = null;
       record.state = 'working'; record.turn = turn; record.eventAt = timestamp;
     }
   }
@@ -164,7 +217,7 @@ function createActivityMonitor(options = {}) {
       const replacement = record.identity !== null && record.identity !== `${stat.dev}:${stat.ino}`;
       if (replacement || stat.size < record.offset) {
         record.offset = 0; record.carry = Buffer.alloc(0); record.skipLine = false;
-        record.initialized = false; record.state = 'unknown'; record.eventAt = 0; record.turn = null;
+        record.initialized = false; record.state = 'unknown'; record.eventAt = 0; record.turn = null; record.pendingError = null;
       }
       record.identity = `${stat.dev}:${stat.ino}`;
       if (!record.initialized) {
@@ -223,7 +276,9 @@ function createActivityMonitor(options = {}) {
       action: 'idle', source: 'unavailable',
     };
     if (latest?.state === 'completed' && time - latest.eventAt <= completionMs) return { ...base, state: 'completed', label: 'Codex 已完成', message: '最近一轮任务已完成，可以回到 Codex 查看结果。', action: 'success' };
-    if (latest?.state === 'aborted' && time - latest.eventAt <= completionMs) return { ...base, state: 'idle', label: '任务已停止', message: '最近一轮任务已停止，等待你的下一步。', action: 'idle' };
+    if (latest?.state === 'failed' && time - latest.eventAt <= completionMs) return { ...base, state: 'failed', label: '任务失败', message: '最近一轮任务未能完成，可以回到 Codex 查看原因。', action: 'sad' };
+    if (latest?.state === 'interrupted' && time - latest.eventAt <= completionMs) return { ...base, state: 'interrupted', label: '任务已中断', message: '最近一轮任务已中断，等你准备好再继续。', action: 'sad' };
+    if (latest?.state === 'unknown') return { ...base, state: 'unknown', label: '任务结果待确认', message: '最近一轮缺少可确认的结果标记，请回到 Codex 查看。', action: 'idle' };
     if (latest?.state === 'working') return { ...base, state: 'unknown', label: '工作状态待确认', message: '较久没有新工作事件，暂时无法确认任务是否仍在运行。', action: 'idle' };
     if (processRunning === true && latest) return { ...base, state: 'idle', label: 'Codex 已就绪', message: '暂无正在进行的任务，随时可以开始。', action: 'idle' };
     return { ...base, state: 'unknown', label: '等待 Codex 状态', message: processRunning === true ? 'Codex 已打开，尚未发现可读取的工作事件。' : '暂时无法确认 Codex 状态，等待本机工作事件。', action: 'idle', source: 'unavailable' };
@@ -252,7 +307,7 @@ function createActivityMonitor(options = {}) {
         for (const [file, candidate] of candidates) {
           if (!records.has(file)) records.set(file, {
             offset: 0, initialized: false, carry: Buffer.alloc(0), skipLine: false,
-            state: 'unknown', turn: null, eventAt: 0, readable: false, identity: null,
+            state: 'unknown', turn: null, eventAt: 0, readable: false, identity: null, pendingError: null,
             origin: candidate.origin, indexUpdatedAt: null, hasBeenPresent: false,
             readError: null, errorCount: 0, hash: createHash('sha256').update(file).digest('hex').slice(0, 12),
           });

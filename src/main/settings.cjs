@@ -13,18 +13,51 @@ function normalize(input = {}) {
     y: Number.isFinite(input.y) ? Math.round(input.y) : null
   };
 }
-function createSettings(directory) {
+function createSettings(directory, { fs: io = fs, onError = () => {} } = {}) {
   const file = path.join(directory, 'settings.json');
-  let current;
-  try { current = normalize(JSON.parse(fs.readFileSync(file, 'utf8'))); } catch { current = { ...defaults }; }
+  const temporary = file + '.tmp';
+  function read(candidate) {
+    try {
+      const data = JSON.parse(io.readFileSync(candidate, 'utf8'));
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+      return normalize(data);
+    } catch { return null; }
+  }
+  // Keep a complete temporary file after a failed copy so an interrupted
+  // non-atomic replacement can recover on the next launch.
+  const committed = read(file);
+  const recovered = committed ? null : read(temporary);
+  let restorePending = Boolean(recovered);
+  let current = committed || recovered || { ...defaults };
   return {
     get: () => ({ ...current }),
     update: patch => {
       const next = normalize({ ...current, ...patch });
-      fs.mkdirSync(directory, { recursive: true });
-      fs.writeFileSync(file + '.tmp', JSON.stringify(next, null, 2));
-      fs.renameSync(file + '.tmp', file);
       current = next;
+      try {
+        io.mkdirSync(directory, { recursive: true });
+        // Do not overwrite the only recoverable settings with a new temporary
+        // write that might itself fail partway through.
+        if (restorePending) {
+          io.copyFileSync(temporary, file);
+          restorePending = false;
+        }
+        io.writeFileSync(temporary, JSON.stringify(next, null, 2));
+        try {
+          io.renameSync(temporary, file);
+        } catch (error) {
+          if (error.code !== 'EXDEV') throw error;
+          // Encrypted/redirected Windows profiles can reject rename even
+          // within one directory. Copy without first removing the old file.
+          io.copyFileSync(temporary, file);
+          try { io.unlinkSync(temporary); } catch { /* The committed file wins on reload. */ }
+        }
+      } catch (error) {
+        restorePending = !read(file) && Boolean(read(temporary));
+        // Drag/blur/tray callbacks must never throw into Electron's main
+        // event loop just because the settings directory is unavailable.
+        try { onError(error); } catch { /* A notification failure is nonfatal too. */ }
+      }
       return { ...current };
     }
   };

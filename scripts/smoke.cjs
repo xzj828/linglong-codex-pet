@@ -7,7 +7,7 @@ const root = path.join(__dirname, '..');
 const output = path.join(root, 'output', 'smoke');
 fs.mkdirSync(output, { recursive: true });
 (async () => {
-  const env = { ...process.env, LINGLONG_TEST: '1', LINGLONG_TEST_DATA: path.join(output, 'profile') };
+  const env = { ...process.env, LINGLONG_TEST: '1', LINGLONG_TEST_DATA: process.env.LINGLONG_SMOKE_PROFILE || path.join(output, 'profile') };
   delete env.ELECTRON_RUN_AS_NODE;
   const launchOptions = { args: process.env.LINGLONG_EXECUTABLE ? [] : [root], env, timeout: 30000 };
   if (process.env.LINGLONG_EXECUTABLE) launchOptions.executablePath = process.env.LINGLONG_EXECUTABLE;

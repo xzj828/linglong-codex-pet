@@ -191,7 +191,10 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { petWindow?.showInactive(); panel('home'); });
   app.whenReady().then(async () => {
-    store = createSettings(app.getPath('userData'));
+    store = createSettings(app.getPath('userData'), { onError: error => {
+      console.warn('Settings could not be saved:', error.code || 'IO_ERROR');
+      send({ message: '暂时无法保存设置，本次操作仍然有效；退出后可能恢复旧设置。' });
+    } });
     try { options = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'local-config.json'), 'utf8')); } catch { options = {}; }
     petWindow = new BrowserWindow({ width: 320, height: 380, frame: false, transparent: true, resizable: false, maximizable: false, minimizable: false, hasShadow: false, skipTaskbar: true, show: false, webPreferences: webPreferences() });
     lockWindow(petWindow); resizePet(true); registerHandlers();
